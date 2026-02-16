@@ -8,6 +8,16 @@ import asyncpg
 import pandas as pd
 from loguru import logger
 
+from config import config
+
+# Shared SQL fragment for excluding non-contractor companies from rankings.
+# Deals still count toward market volume — only company-level rankings filter.
+_CONTRACTOR_FILTER = (
+    "c.company_type NOT IN ("
+    + ", ".join(f"'{t}'" for t in config.excluded_company_types)
+    + ")"
+)
+
 
 async def get_top_companies(
     pool: asyncpg.Pool,
@@ -16,7 +26,7 @@ async def get_top_companies(
 ) -> pd.DataFrame:
     """Top N companies ranked by tender wins in the lookback period."""
     rows = await pool.fetch(
-        """
+        f"""
         SELECT
             ROW_NUMBER() OVER (ORDER BY c.total_wins DESC)  AS "№",
             c.canonical_name   AS "Компания",
@@ -30,6 +40,7 @@ async def get_top_companies(
             c.employee_count   AS "Сотрудники"
         FROM companies c
         WHERE c.total_wins > 0
+          AND {_CONTRACTOR_FILTER}
         ORDER BY c.total_wins DESC
         LIMIT $1
         """,
@@ -44,10 +55,15 @@ async def get_market_overview(
     pool: asyncpg.Pool,
     lookback_months: int = 12,
 ) -> dict[str, Any]:
-    """Market summary metrics, regional distribution, and monthly trends."""
+    """Market summary metrics, regional distribution, and monthly trends.
+
+    Note: Market volume metrics include ALL deals (including non-contractors),
+    because the deals themselves are real construction tenders. The filter
+    only applies to company-level rankings.
+    """
     result: dict[str, Any] = {}
 
-    # Overall metrics
+    # Overall metrics (no company filter — total market size)
     row = await pool.fetchrow(
         """
         SELECT
@@ -58,7 +74,6 @@ async def get_market_overview(
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             ), 2)                           AS avg_discount,
             ROUND(AVG(participants_count)::numeric, 1) AS avg_participants
@@ -69,7 +84,7 @@ async def get_market_overview(
     )
     result["summary"] = dict(row) if row else {}
 
-    # Regional distribution
+    # Regional distribution (no company filter)
     rows = await pool.fetch(
         """
         SELECT
@@ -79,7 +94,6 @@ async def get_market_overview(
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             ), 2)                             AS "Ср. скидка %"
         FROM tender_results
@@ -91,7 +105,7 @@ async def get_market_overview(
     )
     result["by_region"] = pd.DataFrame([dict(r) for r in rows])
 
-    # Monthly trend
+    # Monthly trend (no company filter)
     rows = await pool.fetch(
         """
         SELECT
@@ -107,7 +121,7 @@ async def get_market_overview(
     )
     result["monthly_trend"] = pd.DataFrame([dict(r) for r in rows])
 
-    # Top 10 customers
+    # Top 10 customers (no company filter)
     rows = await pool.fetch(
         """
         SELECT
@@ -132,13 +146,13 @@ async def get_company_position(
     pool: asyncpg.Pool,
     stir: str,
 ) -> pd.DataFrame:
-    """Show where a company ranks among all competitors.
+    """Show where a company ranks among all contractors.
 
-    Includes companies with tender wins OR a rating score, so companies
-    that are rated but haven't won etender tenders still appear.
+    Excludes non-contractor companies (labs, assessors, consultants)
+    from the ranking pool so positions are meaningful.
     """
     rows = await pool.fetch(
-        """
+        f"""
         WITH ranked AS (
             SELECT
                 stir,
@@ -154,8 +168,9 @@ async def get_company_position(
                 RANK() OVER (ORDER BY total_contract_value DESC)           AS rank_volume,
                 RANK() OVER (ORDER BY rating_score DESC NULLS LAST)        AS rank_rating,
                 COUNT(*) OVER ()                                           AS total_companies
-            FROM companies
-            WHERE total_wins > 0 OR rating_score IS NOT NULL
+            FROM companies c
+            WHERE (total_wins > 0 OR rating_score IS NOT NULL)
+              AND {_CONTRACTOR_FILTER}
         )
         SELECT
             canonical_name       AS "Компания",
@@ -186,10 +201,11 @@ async def find_company_by_name(
     search: str,
     limit: int = 10,
 ) -> pd.DataFrame:
-    """Fuzzy search for companies by name (useful for finding UET's STIR)."""
+    """Fuzzy search for companies by name. Shows company_type for transparency."""
     rows = await pool.fetch(
         """
-        SELECT stir, canonical_name, total_wins, total_contract_value, rating_letter
+        SELECT stir, canonical_name, company_type, total_wins,
+               total_contract_value, rating_letter
         FROM companies
         WHERE canonical_name ILIKE $1
            OR raw_names::text ILIKE $1

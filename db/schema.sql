@@ -22,12 +22,14 @@ CREATE TABLE companies (
 
     -- Aggregated from tender_results (set by enrichment pipeline)
     total_wins              INTEGER DEFAULT 0,
-    total_participations    INTEGER DEFAULT 0,
     total_contract_value    NUMERIC(18,2) DEFAULT 0,
     avg_discount_pct        NUMERIC(5,2),
     first_tender_date       DATE,
     last_tender_date        DATE,
     active_regions          JSONB DEFAULT '[]'::jsonb,
+
+    -- Classification (set by enrichment pipeline)
+    company_type        VARCHAR(30) DEFAULT 'unknown',
 
     -- Metadata
     first_seen_at       TIMESTAMPTZ DEFAULT NOW(),
@@ -41,6 +43,7 @@ CREATE INDEX idx_companies_rating_letter         ON companies (rating_letter);
 CREATE INDEX idx_companies_total_wins            ON companies (total_wins DESC);
 CREATE INDEX idx_companies_total_contract_value  ON companies (total_contract_value DESC);
 CREATE INDEX idx_companies_region                ON companies (region);
+CREATE INDEX idx_companies_type                  ON companies (company_type);
 CREATE INDEX idx_companies_name_trgm             ON companies USING gin (canonical_name gin_trgm_ops);
 
 

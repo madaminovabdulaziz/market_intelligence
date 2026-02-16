@@ -23,6 +23,7 @@ class ETenderScraper(BaseScraper):
 
     API_URL = config.etender_api_url
     CONSTRUCTION_KEYWORDS: list[str] = config.construction_keywords
+    NON_CONSTRUCTION_KEYWORDS: list[str] = config.non_construction_keywords
 
     # Required headers — API needs Origin/Referer from the SPA
     API_HEADERS: dict[str, str] = {
@@ -59,12 +60,36 @@ class ETenderScraper(BaseScraper):
     # ── Filtering ────────────────────────────────────────────
 
     def is_construction_deal(self, deal: dict[str, Any]) -> bool:
-        """Check category_name and customer_name for construction keywords."""
-        text = " ".join([
-            str(deal.get("category_name") or ""),
+        """Two-tier construction deal filter.
+
+        Tier 1: category_name contains construction keywords AND no
+                non-construction keywords → accept.  If both match
+                (e.g., "питание в дошкольных" matches "школ" + "питан"),
+                the non-construction keyword wins — it's more specific.
+        Tier 2: customer_name or provider_name matches, but category_name
+                is NOT obviously non-construction → accept.
+        """
+        category = str(deal.get("category_name") or "").lower()
+        is_non_construction = any(
+            nkw in category for nkw in self.NON_CONSTRUCTION_KEYWORDS
+        )
+
+        # Tier 1: direct match on the deal's own description
+        if any(kw in category for kw in self.CONSTRUCTION_KEYWORDS):
+            # If category also matches a non-construction keyword,
+            # the deal is ambiguous — reject it.
+            return not is_non_construction
+
+        # Tier 2: secondary signals from party names
+        secondary = " ".join([
             str(deal.get("customer_name") or ""),
+            str(deal.get("provider_name") or ""),
         ]).lower()
-        return any(kw in text for kw in self.CONSTRUCTION_KEYWORDS)
+
+        if any(kw in secondary for kw in self.CONSTRUCTION_KEYWORDS):
+            return not is_non_construction
+
+        return False
 
     # ── Main scraping loop ───────────────────────────────────
 

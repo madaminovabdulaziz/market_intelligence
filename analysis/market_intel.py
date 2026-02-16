@@ -8,6 +8,15 @@ import asyncpg
 import pandas as pd
 from loguru import logger
 
+from config import config
+
+# Shared SQL fragment: exclude non-contractor companies from competitor rankings.
+_CONTRACTOR_FILTER = (
+    "c.company_type NOT IN ("
+    + ", ".join(f"'{t}'" for t in config.excluded_company_types)
+    + ")"
+)
+
 
 async def get_market_summary(pool: asyncpg.Pool) -> dict[str, Any]:
     """Overall construction tender market metrics."""
@@ -20,7 +29,6 @@ async def get_market_summary(pool: asyncpg.Pool) -> dict[str, Any]:
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             )::numeric, 2) AS avg_discount,
             ROUND(AVG(participants_count)::numeric, 1) AS avg_participants,
@@ -42,7 +50,6 @@ async def get_market_summary_12m(pool: asyncpg.Pool) -> dict[str, Any]:
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             )::numeric, 2) AS avg_discount,
             ROUND(AVG(participants_count)::numeric, 1) AS avg_participants
@@ -77,7 +84,6 @@ async def get_regional_distribution(pool: asyncpg.Pool) -> pd.DataFrame:
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             )::numeric, 2) AS "Ср. скидка %"
         FROM tender_results
@@ -98,7 +104,6 @@ async def get_top_customers(pool: asyncpg.Pool, limit: int = 10) -> pd.DataFrame
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             )::numeric, 2) AS "Ср. скидка %"
         FROM tender_results
@@ -120,7 +125,6 @@ async def get_tashkent_customers(pool: asyncpg.Pool, limit: int = 10) -> pd.Data
             ROUND(AVG(
                 CASE WHEN start_cost > 0
                      THEN (start_cost - deal_cost) / start_cost * 100
-                     ELSE 0
                 END
             )::numeric, 2) AS "Ср. скидка %"
         FROM tender_results
@@ -242,7 +246,7 @@ async def get_uet_rating_detail(pool: asyncpg.Pool, stir: str) -> pd.DataFrame:
 
 async def get_tashkent_competitors(pool: asyncpg.Pool, limit: int = 15) -> pd.DataFrame:
     """Top companies active in Tashkent tenders."""
-    rows = await pool.fetch("""
+    rows = await pool.fetch(f"""
         SELECT
             c.canonical_name AS "Компания",
             c.stir AS "СТИР",
@@ -259,8 +263,9 @@ async def get_tashkent_competitors(pool: asyncpg.Pool, limit: int = 15) -> pd.Da
             )::numeric, 2) AS "Ср. скидка %"
         FROM companies c
         JOIN tender_results t ON c.stir = t.provider_stir
-        WHERE t.region ILIKE '%toshkent%' OR t.region ILIKE '%тошкент%'
-              OR t.region ILIKE '%ташкент%'
+        WHERE (t.region ILIKE '%toshkent%' OR t.region ILIKE '%тошкент%'
+              OR t.region ILIKE '%ташкент%')
+          AND {_CONTRACTOR_FILTER}
         GROUP BY c.stir, c.canonical_name, c.rating_letter, c.rating_score,
                  c.employee_count
         ORDER BY COUNT(t.deal_id) DESC
@@ -271,7 +276,7 @@ async def get_tashkent_competitors(pool: asyncpg.Pool, limit: int = 15) -> pd.Da
 
 async def get_top_companies_overall(pool: asyncpg.Pool, limit: int = 15) -> pd.DataFrame:
     """Top N companies nationally by tender wins (last 12 months)."""
-    rows = await pool.fetch("""
+    rows = await pool.fetch(f"""
         SELECT
             ROW_NUMBER() OVER (ORDER BY c.total_wins DESC) AS "№",
             c.canonical_name AS "Компания",
@@ -285,6 +290,7 @@ async def get_top_companies_overall(pool: asyncpg.Pool, limit: int = 15) -> pd.D
             c.employee_count AS "Сотрудники"
         FROM companies c
         WHERE c.total_wins > 0
+          AND {_CONTRACTOR_FILTER}
         ORDER BY c.total_wins DESC
         LIMIT $1
     """, limit)

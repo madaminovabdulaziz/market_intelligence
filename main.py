@@ -155,6 +155,27 @@ def enrich(
 
 
 @app.command()
+def classify():
+    """Classify companies into types (contractor, consultant, laboratory, etc.).
+
+    Runs the classification step only, without full enrichment.
+    Useful for re-classifying after keyword list changes.
+    """
+    async def _classify():
+        from db.connection import close_pool, get_pool
+        from pipeline.enrich import EnrichmentPipeline
+
+        pool = await get_pool()
+        pipeline = EnrichmentPipeline(pool)
+        count = await pipeline.classify_company_types()
+        await pipeline.verify_classification()
+        typer.echo(f"\nClassification complete: {count} companies updated")
+        await close_pool()
+
+    _run(_classify())
+
+
+@app.command()
 def analyze(
     report: str = typer.Argument(
         ..., help="'top15', 'profile', 'compare', 'market', 'position', 'search'",

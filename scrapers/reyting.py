@@ -160,20 +160,39 @@ class ReytingScraper(BaseScraper):
         limit: int = 200,
         type_id: int = 0,
     ) -> dict[str, int]:
-        """Fetch detailed rating breakdown for top companies."""
+        """Fetch detailed rating breakdown for selected companies.
+
+        Priority order for auto-selection (when stirs is None):
+        1. Rated companies with tender wins (most useful for analysis)
+        2. Top rated companies by score (fills remaining quota)
+        Already-scraped companies (in company_ratings) are skipped.
+        """
         log_id = await self.start_scrape_log("reyting_detail")
 
         try:
             if stirs is None:
                 rows = await self.pool.fetch(
-                    """SELECT stir FROM companies
-                       WHERE rating_score IS NOT NULL
-                       ORDER BY rating_score DESC
-                       LIMIT $1""",
+                    """SELECT stir FROM (
+                        -- Priority 1: rated tender winners (most useful for competitor analysis)
+                        SELECT stir, 0 AS priority, total_wins AS sort_key
+                        FROM companies
+                        WHERE rating_score IS NOT NULL
+                          AND total_wins > 0
+                          AND stir NOT IN (SELECT DISTINCT company_stir FROM company_ratings)
+                        UNION ALL
+                        -- Priority 2: top rated companies (fills remaining quota)
+                        SELECT stir, 1 AS priority, rating_score AS sort_key
+                        FROM companies
+                        WHERE rating_score IS NOT NULL
+                          AND stir NOT IN (SELECT DISTINCT company_stir FROM company_ratings)
+                          AND total_wins = 0
+                    ) sub
+                    ORDER BY priority, sort_key DESC
+                    LIMIT $1""",
                     limit,
                 )
                 stirs = [r["stir"] for r in rows]
-                logger.info("Selected top {} companies by rating score", len(stirs))
+                logger.info("Selected {} companies for detail scrape (tender winners first)", len(stirs))
 
             stats = {"found": len(stirs), "inserted": 0, "failed": 0}
             sem = asyncio.Semaphore(config.reyting_concurrency)
